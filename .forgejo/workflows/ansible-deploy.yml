@@ -1,0 +1,204 @@
+---
+# .forgejo/workflows/ansible-deploy.yml
+# Runs the full Kubernetes cluster installation via Ansible + Kubespray.
+# Trigger: manual only (workflow_dispatch).
+#
+# Runner label: proxmox-infra
+#
+# Secrets (Settings → Secrets):
+#   PROXMOX_SSH_PRIVATE_KEY  — authorised on Proxmox host root ONLY (for terraform init)
+#   ANSIBLE_SSH_PRIVATE_KEY  — authorised on K8s VMs ubuntu user ONLY (for Ansible)
+#   ANSIBLE_SSH_PUBLIC_KEY   — public half of ANSIBLE_SSH_PRIVATE_KEY
+#   PROXMOX_VE_ENDPOINT      — needed for `terraform init` (provider)
+#   PROXMOX_VE_API_TOKEN
+#   RUSTFS_ACCESS_KEY
+#   RUSTFS_SECRET_KEY
+#   RUSTFS_ENDPOINT          — http://<your-rustfs-ip>:30293 (S3 backend endpoint)
+#
+# Variables (Settings → Variables):
+#   TF_VAR_PROXMOX_NODE
+#   TF_VAR_NETWORK_GATEWAY
+#   TF_VAR_NETWORK_BRIDGE
+#   TF_VAR_CP01_IP
+#   TF_VAR_WORKER01_IP
+#   TF_VAR_WORKER02_IP
+#   TF_VAR_DISK_DATASTORE
+#   TF_VAR_IMAGE_DATASTORE
+#   TF_VAR_PROXMOX_TLS_INSECURE
+
+name: Ansible — Deploy K8s Cluster
+
+on:
+  workflow_dispatch:
+    inputs:
+      kubespray_tags:
+        description: "Ansible tags to pass to Kubespray (blank = full install)"
+        required: false
+        default: ""
+        type: string
+      skip_preflight:
+        description: "Skip pre-k8s.yml (set to 'true' if VMs already prepped)"
+        required: false
+        default: "false"
+        type: string
+
+run-name: "K8s deploy — ${{ github.ref_name }} @ ${{ github.sha }}"
+
+# Serialize all K8s deploys. A second run triggered while one is in progress
+# will queue — not cancel. Prevents two Kubespray runs from touching the same
+# cluster simultaneously, which would corrupt etcd state.
+concurrency:
+  group: k8s-homelab-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [proxmox-infra]
+    timeout-minutes: 90
+
+    env:
+      ANSIBLE_FORCE_COLOR: "1"
+      ANSIBLE_CONFIG: ansible/ansible.cfg
+      TF_ENV_DIR: terraform/envs/homelab
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Remove stale kubeconfig from previous run
+        shell: bash
+        # On a persistent host runner the workspace is reused between runs.
+        # Without this step, a failed deploy could upload a kubeconfig from
+        # a previous successful run — giving the operator false confidence.
+        run: rm -f kubeconfig/homelab.yaml
+
+      - name: Clone Kubespray
+        run: |
+          rm -rf ansible/kubespray
+          git clone --branch v2.26.0 --depth 1 \
+            https://github.com/kubernetes-sigs/kubespray.git \
+            ansible/kubespray
+
+      - name: Install Ansible SSH key
+        shell: bash
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.ANSIBLE_SSH_PRIVATE_KEY }}" > ~/.ssh/k8s_ansible
+          chmod 600 ~/.ssh/k8s_ansible
+          # Explicitly verify the Proxmox key is NOT written here — belt-and-suspenders
+          # The PROXMOX_SSH_PRIVATE_KEY secret is only consumed by the Terraform
+          # provider env var below; it is never written to disk in this workflow.
+
+      - name: Create Python venv and install dependencies
+        shell: bash
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install --quiet --upgrade pip
+          pip install --quiet -r ansible/requirements.txt
+          pip install --quiet -r ansible/kubespray/requirements.txt
+          echo "VIRTUAL_ENV=$GITHUB_WORKSPACE/.venv" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install Ansible Galaxy collections
+        shell: bash
+        run: |
+          ansible-galaxy collection install -r ansible/requirements.yml --force
+          ansible-galaxy collection install \
+            -r ansible/kubespray/requirements.yml --force 2>/dev/null || true
+
+      - name: Extract Terraform output
+        shell: bash
+        working-directory: ${{ env.TF_ENV_DIR }}
+        env:
+          AWS_ACCESS_KEY_ID:        ${{ secrets.RUSTFS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY:    ${{ secrets.RUSTFS_SECRET_KEY }}
+          # Proxmox provider — Proxmox key only (does NOT go to VMs)
+          TF_VAR_proxmox_endpoint:    ${{ secrets.PROXMOX_VE_ENDPOINT }}
+          TF_VAR_proxmox_api_token:   ${{ secrets.PROXMOX_VE_API_TOKEN }}
+          PROXMOX_VE_SSH_PRIVATE_KEY: ${{ secrets.PROXMOX_SSH_PRIVATE_KEY }}
+          TF_VAR_proxmox_ssh_private_key: ${{ secrets.PROXMOX_SSH_PRIVATE_KEY }}
+          # Ansible key — public half only; needed so `terraform init` can
+          # validate variable declarations. The private key is never used by Terraform.
+          TF_VAR_ansible_ssh_public_key:  ${{ secrets.ANSIBLE_SSH_PUBLIC_KEY }}
+          TF_VAR_proxmox_node:      ${{ vars.TF_VAR_PROXMOX_NODE }}
+          TF_VAR_network_gateway:   ${{ vars.TF_VAR_NETWORK_GATEWAY }}
+          TF_VAR_network_bridge:    ${{ vars.TF_VAR_NETWORK_BRIDGE }}
+          TF_VAR_cp01_ip:           ${{ vars.TF_VAR_CP01_IP }}
+          TF_VAR_worker01_ip:       ${{ vars.TF_VAR_WORKER01_IP }}
+          TF_VAR_worker02_ip:       ${{ vars.TF_VAR_WORKER02_IP }}
+          TF_VAR_disk_datastore:    ${{ vars.TF_VAR_DISK_DATASTORE }}
+          TF_VAR_image_datastore:   ${{ vars.TF_VAR_IMAGE_DATASTORE }}
+          TF_VAR_proxmox_tls_insecure: ${{ vars.TF_VAR_PROXMOX_TLS_INSECURE }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/ansible/inventory/generated"
+          terraform init -reconfigure -input=false -no-color \
+            -backend-config="bucket=terraform-state" \
+            -backend-config="key=k8s-infra/homelab/terraform.tfstate" \
+            -backend-config="region=us-east-1" \
+            -backend-config="endpoints={s3=\"${{ secrets.RUSTFS_ENDPOINT }}\"}"
+          terraform output -json > \
+            "$GITHUB_WORKSPACE/ansible/inventory/generated/terraform-output.json"
+
+      - name: Generate Kubespray inventory
+        shell: bash
+        run: |
+          python3 ansible/scripts/generate_inventory.py \
+            --tf-output ansible/inventory/generated/terraform-output.json \
+            --out ansible/inventory/generated/hosts.yaml
+
+          CP_IP="$(python3 - <<'PY'
+          import json
+          with open('ansible/inventory/generated/terraform-output.json') as f:
+              d = json.load(f)
+          print(d['control_plane_ip']['value'])
+          PY
+          )"
+
+          echo "CP_IP=$CP_IP" >> "$GITHUB_ENV"
+
+      - name: Run pre-k8s playbook
+        if: inputs.skip_preflight != 'true'
+        shell: bash
+        run: |
+          ansible-playbook \
+            -i ansible/inventory/generated/hosts.yaml \
+            --private-key ~/.ssh/k8s_ansible \
+            ansible/playbooks/pre-k8s.yml
+
+      - name: Run Kubespray cluster.yml
+        shell: bash
+        run: |
+          TAGS="${{ inputs.kubespray_tags }}"
+
+          ansible-playbook \
+            -i ansible/inventory/generated/hosts.yaml \
+            --private-key ~/.ssh/k8s_ansible \
+            --extra-vars "supplementary_addresses_in_ssl_keys=['$CP_IP']" \
+            $( [ -n "$TAGS" ] && echo "--tags $TAGS" ) \
+            ansible/kubespray/cluster.yml
+
+      - name: Run post-k8s playbook
+        shell: bash
+        run: |
+          ansible-playbook \
+            -i ansible/inventory/generated/hosts.yaml \
+            --private-key ~/.ssh/k8s_ansible \
+            ansible/playbooks/post-k8s.yml
+
+      - name: Upload kubeconfig artifact
+        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        if: success()
+        with:
+          name: kubeconfig-homelab
+          path: kubeconfig/homelab.yaml
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Cleanup sensitive files
+        if: always()
+        shell: bash
+        run: |
+          rm -f ~/.ssh/k8s_ansible
+          rm -f ansible/inventory/generated/terraform-output.json
+          rm -f ansible/inventory/generated/hosts.yaml

@@ -1,0 +1,11 @@
+---
+# ansible/requirements.yml
+# ansible-galaxy collection install -r ansible/requirements.yml
+
+collections:
+  - name: community.general
+    version: ">=9.0,<10"
+  - name: ansible.posix
+    version: ">=1.5,<2"
+  - name: kubernetes.core
+    version: ">=3.0,<4"

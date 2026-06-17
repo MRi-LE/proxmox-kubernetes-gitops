@@ -1,0 +1,152 @@
+---
+# .forgejo/workflows/terraform-apply.yml
+# Applies Terraform changes — MANUAL TRIGGER ONLY (workflow_dispatch).
+# Never runs automatically on push or merge.
+#
+# Runner label: proxmox-infra
+#
+# Secrets (Settings → Secrets):
+#   PROXMOX_VE_ENDPOINT
+#   PROXMOX_VE_API_TOKEN
+#   RUSTFS_ACCESS_KEY
+#   RUSTFS_SECRET_KEY
+#   RUSTFS_ENDPOINT          — http://<your-rustfs-ip>:30293
+#   PROXMOX_SSH_PRIVATE_KEY  — authorised on Proxmox host root ONLY
+#   ANSIBLE_SSH_PUBLIC_KEY   — injected into K8s VMs via cloud-init ONLY
+#
+# Variables (Settings → Variables):
+#   TF_VAR_PROXMOX_NODE
+#   TF_VAR_NETWORK_GATEWAY
+#   TF_VAR_NETWORK_BRIDGE
+#   TF_VAR_CP01_IP
+#   TF_VAR_WORKER01_IP
+#   TF_VAR_WORKER02_IP
+#   TF_VAR_DISK_DATASTORE
+#   TF_VAR_IMAGE_DATASTORE
+#   TF_VAR_PROXMOX_TLS_INSECURE
+
+name: Terraform — Apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      terraform_action:
+        description: "Terraform action to run"
+        required: true
+        default: "apply"
+        type: choice
+        options:
+          - apply
+          - destroy
+
+run-name: "TF ${{ inputs.terraform_action }} — ${{ github.ref_name }}"
+
+# Serialize all Terraform runs against this environment.
+# cancel-in-progress: false means a queued run waits — it does not get killed.
+# This prevents an apply and a destroy from running simultaneously.
+concurrency:
+  group: terraform-homelab
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: [proxmox-infra]
+    timeout-minutes: 60
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      TF_WORKING_DIR: terraform/envs/homelab
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          AWS_ACCESS_KEY_ID:        ${{ secrets.RUSTFS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY:    ${{ secrets.RUSTFS_SECRET_KEY }}
+          # Proxmox provider — API token + SSH into Proxmox host only
+          TF_VAR_proxmox_endpoint:    ${{ secrets.PROXMOX_VE_ENDPOINT }}
+          TF_VAR_proxmox_api_token:   ${{ secrets.PROXMOX_VE_API_TOKEN }}
+          PROXMOX_VE_SSH_PRIVATE_KEY: ${{ secrets.PROXMOX_SSH_PRIVATE_KEY }}
+          TF_VAR_proxmox_ssh_private_key: ${{ secrets.PROXMOX_SSH_PRIVATE_KEY }}
+          # ansible_ssh_public_key is used by cloud-init module; private key belongs to Ansible only
+          TF_VAR_ansible_ssh_public_key:  ${{ secrets.ANSIBLE_SSH_PUBLIC_KEY }}
+        run: |
+          terraform init -reconfigure -no-color \
+            -backend-config="bucket=terraform-state" \
+            -backend-config="key=k8s-infra/homelab/terraform.tfstate" \
+            -backend-config="region=us-east-1" \
+            -backend-config="endpoints={s3=\"${{ secrets.RUSTFS_ENDPOINT }}\"}"
+
+      - name: Terraform apply
+        if: inputs.terraform_action == 'apply'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          AWS_ACCESS_KEY_ID:        ${{ secrets.RUSTFS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY:    ${{ secrets.RUSTFS_SECRET_KEY }}
+          # Proxmox provider
+          TF_VAR_proxmox_endpoint:    ${{ secrets.PROXMOX_VE_ENDPOINT }}
+          TF_VAR_proxmox_api_token:   ${{ secrets.PROXMOX_VE_API_TOKEN }}
+          PROXMOX_VE_SSH_PRIVATE_KEY: ${{ secrets.PROXMOX_SSH_PRIVATE_KEY }}
+          TF_VAR_proxmox_ssh_private_key: ${{ secrets.PROXMOX_SSH_PRIVATE_KEY }}
+          # Ansible key — public half only; Terraform injects it into VMs via cloud-init.
+          # The private key is never needed by Terraform.
+          TF_VAR_ansible_ssh_public_key:  ${{ secrets.ANSIBLE_SSH_PUBLIC_KEY }}
+          # Non-sensitive variables
+          TF_VAR_proxmox_node:      ${{ vars.TF_VAR_PROXMOX_NODE }}
+          TF_VAR_network_gateway:   ${{ vars.TF_VAR_NETWORK_GATEWAY }}
+          TF_VAR_network_bridge:    ${{ vars.TF_VAR_NETWORK_BRIDGE }}
+          TF_VAR_cp01_ip:           ${{ vars.TF_VAR_CP01_IP }}
+          TF_VAR_worker01_ip:       ${{ vars.TF_VAR_WORKER01_IP }}
+          TF_VAR_worker02_ip:       ${{ vars.TF_VAR_WORKER02_IP }}
+          TF_VAR_disk_datastore:    ${{ vars.TF_VAR_DISK_DATASTORE }}
+          TF_VAR_image_datastore:   ${{ vars.TF_VAR_IMAGE_DATASTORE }}
+          TF_VAR_proxmox_tls_insecure: ${{ vars.TF_VAR_PROXMOX_TLS_INSECURE }}
+        run: terraform apply -auto-approve -no-color
+
+      - name: Terraform destroy
+        if: inputs.terraform_action == 'destroy'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          AWS_ACCESS_KEY_ID:        ${{ secrets.RUSTFS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY:    ${{ secrets.RUSTFS_SECRET_KEY }}
+          # Proxmox provider
+          TF_VAR_proxmox_endpoint:    ${{ secrets.PROXMOX_VE_ENDPOINT }}
+          TF_VAR_proxmox_api_token:   ${{ secrets.PROXMOX_VE_API_TOKEN }}
+          PROXMOX_VE_SSH_PRIVATE_KEY: ${{ secrets.PROXMOX_SSH_PRIVATE_KEY }}
+          TF_VAR_proxmox_ssh_private_key: ${{ secrets.PROXMOX_SSH_PRIVATE_KEY }}
+          TF_VAR_ansible_ssh_public_key:  ${{ secrets.ANSIBLE_SSH_PUBLIC_KEY }}
+          TF_VAR_proxmox_node:      ${{ vars.TF_VAR_PROXMOX_NODE }}
+          TF_VAR_network_gateway:   ${{ vars.TF_VAR_NETWORK_GATEWAY }}
+          TF_VAR_network_bridge:    ${{ vars.TF_VAR_NETWORK_BRIDGE }}
+          TF_VAR_cp01_ip:           ${{ vars.TF_VAR_CP01_IP }}
+          TF_VAR_worker01_ip:       ${{ vars.TF_VAR_WORKER01_IP }}
+          TF_VAR_worker02_ip:       ${{ vars.TF_VAR_WORKER02_IP }}
+          TF_VAR_disk_datastore:    ${{ vars.TF_VAR_DISK_DATASTORE }}
+          TF_VAR_image_datastore:   ${{ vars.TF_VAR_IMAGE_DATASTORE }}
+          TF_VAR_proxmox_tls_insecure: ${{ vars.TF_VAR_PROXMOX_TLS_INSECURE }}
+        run: terraform destroy -auto-approve -no-color
+
+      - name: Export Terraform outputs
+        if: inputs.terraform_action == 'apply'
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.RUSTFS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RUSTFS_SECRET_KEY }}
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/ansible/inventory/generated
+          terraform output -json > \
+            $GITHUB_WORKSPACE/ansible/inventory/generated/terraform-output.json
+          echo "── Terraform outputs ──"
+          cat $GITHUB_WORKSPACE/ansible/inventory/generated/terraform-output.json
+
+      - name: Upload TF outputs artifact (for Ansible workflow)
+        if: inputs.terraform_action == 'apply'
+        uses: https://code.forgejo.org/forgejo/upload-artifact@v4
+        with:
+          name: terraform-outputs
+          path: ansible/inventory/generated/terraform-output.json
+          retention-days: 1

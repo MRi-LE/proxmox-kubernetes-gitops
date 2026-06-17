@@ -1,0 +1,16 @@
+# ansible/requirements.txt
+# pip install -r requirements.txt
+# Keep pinned to minor version for reproducibility.
+
+# Kubespray v2.26.0 expects Ansible 2.16.x.
+# Do not upgrade to ansible-core 2.17+ unless Kubespray is upgraded too.
+# Kubespray's own requirements.txt pins ansible==9.8.0 (the meta-package that
+# pulls ansible-core 2.16.x). We pin ansible-core directly to avoid the
+# meta-package layer but match the same underlying version range.
+ansible-core>=2.16.4,<2.17.0
+
+pyyaml>=6.0,<7
+jmespath>=1.0
+
+# Local linting only — not needed on the CI runner
+# ansible-lint==24.*

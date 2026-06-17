@@ -1,0 +1,62 @@
+# terraform/envs/homelab/terraform.tfvars.example
+#
+# Copy to terraform.tfvars and fill in your values for local Terraform runs.
+# terraform.tfvars is .gitignored — NEVER commit it.
+#
+# In CI (Forgejo workflows), all values are injected via Forgejo Secrets and
+# Variables — no tfvars file is used or needed on the runner.
+
+# ── Proxmox connection ─────────────────────────────────────────────────────────
+# Required. Find your endpoint in Proxmox UI → top-right hostname/IP.
+proxmox_endpoint  = "https://<your-proxmox-ip>:8006"
+proxmox_api_token = "terraform@pam!ci=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+proxmox_node      = "proxmox"   # verify in Proxmox UI → Datacenter → node name
+
+# ── SSH keys — two separate keypairs ─────────────────────────────────────────
+# See docs/03-proxmox-prep.md for key generation.
+# See docs/11-security-key-rotation.md for rotation procedures.
+#
+# proxmox_ssh_private_key: authorised on root@proxmox ONLY.
+#   Used by the bpg/proxmox Terraform provider to SSH into the Proxmox host
+#   for disk import. Never injected into K8s VMs.
+#
+# ansible_ssh_public_key: injected into K8s VMs via cloud-init ONLY.
+#   The matching private key (k8s_ansible) is used exclusively by Ansible —
+#   it is NOT a Terraform variable. Never authorise it on the Proxmox host.
+
+proxmox_ssh_private_key = <<EOT
+<PASTE THE FULL CONTENT OF ~/.ssh/k8s_proxmox HERE>
+EOT
+
+ansible_ssh_public_key = "ssh-ed25519 AAAA... k8s-ansible deploy key"
+
+# ── Networking — REQUIRED, no defaults ────────────────────────────────────────
+# These must match your LAN. Check your router/DHCP settings for the gateway.
+# Choose IPs that are free and outside your DHCP range.
+# These values must also be set as Forgejo Variables (TF_VAR_NETWORK_GATEWAY,
+# TF_VAR_CP01_IP, etc.) so that CI workflows use the same addresses.
+network_gateway = "<your-gateway-ip>"    # e.g. 192.168.1.1
+network_bridge  = "vmbr0"               # verify in Proxmox UI → node → Network
+
+cp01_ip     = "<free-ip-for-cp01>"      # e.g. 192.168.1.201
+worker01_ip = "<free-ip-for-worker01>"  # e.g. 192.168.1.202
+worker02_ip = "<free-ip-for-worker02>"  # e.g. 192.168.1.203
+
+# ── Storage datastores ─────────────────────────────────────────────────────────
+# Check your datastore names in: Proxmox UI → Datacenter → Storage
+# disk_datastore:  where VM and template root disks live
+#   common values: local-lvm (default), ceph-pool, ssd-pool
+# image_datastore: where the Ubuntu cloud image is downloaded
+#   must accept "iso" content — commonly "local"
+disk_datastore  = "local-lvm"
+image_datastore = "local"
+
+# ── TLS ───────────────────────────────────────────────────────────────────────
+# true  = skip TLS verification (required for Proxmox self-signed certs — the default)
+# false = enforce TLS verification (only if you have a valid, trusted cert on Proxmox)
+proxmox_tls_insecure = true
+
+# ── Template — Terraform creates and manages this automatically ────────────────
+# Only uncomment and override if you need a different name or VM ID.
+# template_name   = "ubuntu-24.04-cloud"
+# template_vm_id  = 9000

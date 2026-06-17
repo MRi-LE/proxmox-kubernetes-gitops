@@ -1,0 +1,124 @@
+---
+# .forgejo/workflows/validate.yml
+# Lightweight quality gate — runs on every PR targeting main.
+# Does NOT touch Proxmox, does NOT modify state.
+#
+# What it checks:
+#   1. terraform fmt  — all .tf files are consistently formatted
+#   2. terraform validate — configuration is structurally valid (no backend needed)
+#   3. Python syntax  — generate_inventory.py compiles without errors
+#   4. YAML syntax    — all workflow and Ansible YAML files parse cleanly
+#
+# Why this matters (teaching note):
+#   CI quality gates catch mistakes before a human reviewer sees them.
+#   A fmt failure means someone edited .tf files without running
+#   `terraform fmt` locally. A validate failure means the config is broken
+#   regardless of what values are passed in. Both are fast to fix early,
+#   expensive to debug after apply.
+#
+# Runner label: proxmox-infra
+#
+# Secrets required:
+#   PROXMOX_VE_ENDPOINT, PROXMOX_VE_API_TOKEN, PROXMOX_SSH_PRIVATE_KEY,
+#   ANSIBLE_SSH_PUBLIC_KEY, RUSTFS_ACCESS_KEY, RUSTFS_SECRET_KEY
+#   (needed so `terraform validate` can initialise the provider schema
+#    with -backend=false; no state is read or written)
+#   Note: RUSTFS_ENDPOINT is NOT required here — -backend=false skips backend init.
+
+name: Validate
+
+on:
+  pull_request:
+    branches:
+      - main
+
+run-name: "Validate — PR #${{ github.event.pull_request.number }}"
+
+jobs:
+  validate:
+    runs-on: [proxmox-infra]
+    timeout-minutes: 15
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT:         "false"
+      TF_WORKING_DIR:   terraform/envs/homelab
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Terraform ─────────────────────────────────────────────────────────────
+
+      - name: Terraform fmt check
+        # Fails if any .tf file is not formatted according to canonical style.
+        # Fix locally with: terraform fmt -recursive terraform/
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform fmt -check -recursive ../../
+
+      - name: Terraform init (no backend)
+        # Downloads provider schemas so `terraform validate` can type-check
+        # resource arguments. -backend=false means no state is read or written.
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          # Provider credentials are needed for schema download even with
+          # -backend=false. No Proxmox API calls are made during validate.
+          TF_VAR_proxmox_endpoint:        ${{ secrets.PROXMOX_VE_ENDPOINT }}
+          TF_VAR_proxmox_api_token:       ${{ secrets.PROXMOX_VE_API_TOKEN }}
+          TF_VAR_proxmox_ssh_private_key: ${{ secrets.PROXMOX_SSH_PRIVATE_KEY }}
+          TF_VAR_ansible_ssh_public_key:  ${{ secrets.ANSIBLE_SSH_PUBLIC_KEY }}
+        run: terraform init -backend=false -no-color
+
+      - name: Terraform validate
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        env:
+          TF_VAR_proxmox_endpoint:        ${{ secrets.PROXMOX_VE_ENDPOINT }}
+          TF_VAR_proxmox_api_token:       ${{ secrets.PROXMOX_VE_API_TOKEN }}
+          TF_VAR_proxmox_ssh_private_key: ${{ secrets.PROXMOX_SSH_PRIVATE_KEY }}
+          TF_VAR_ansible_ssh_public_key:  ${{ secrets.ANSIBLE_SSH_PUBLIC_KEY }}
+        run: terraform validate -no-color
+
+      # ── Python ────────────────────────────────────────────────────────────────
+
+      - name: Python syntax check
+        # py_compile raises SyntaxError on import — fast, no dependencies needed.
+        run: python3 -m py_compile ansible/scripts/generate_inventory.py
+
+      - name: Inventory generator tests
+        # Requires pytest and pyyaml — both installed in the runner venv or
+        # system Python. If pytest is not available, install it:
+        #   pip install pytest pyyaml --break-system-packages
+        run: |
+          python3 -m pytest tests/ -v --tb=short
+
+      # ── YAML ─────────────────────────────────────────────────────────────────
+
+      - name: YAML syntax check
+        # Uses only stdlib — no external linter needed.
+        # Checks all workflow files and all Ansible YAML files.
+        run: |
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+          import yaml
+
+          paths = (
+              list(Path(".forgejo/workflows").glob("*.yml")) +
+              list(Path("ansible").rglob("*.yml"))
+          )
+
+          errors = []
+          for p in sorted(paths):
+              try:
+                  yaml.safe_load(p.read_text())
+                  print(f"  OK  {p}")
+              except yaml.YAMLError as e:
+                  errors.append((p, e))
+                  print(f"  FAIL {p}: {e}", file=sys.stderr)
+
+          if errors:
+              print(f"\n{len(errors)} file(s) failed YAML parse.", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"\n{len(paths)} file(s) passed.")
+          PY

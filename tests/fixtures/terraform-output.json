@@ -1,0 +1,30 @@
+{
+  "vm_ips": {
+    "value": {
+      "k8s-cp-01":     "192.168.1.201",
+      "k8s-worker-01": "192.168.1.202",
+      "k8s-worker-02": "192.168.1.203"
+    },
+    "type": ["object", {"k8s-cp-01": "string", "k8s-worker-01": "string", "k8s-worker-02": "string"}]
+  },
+  "control_planes": {
+    "value": ["k8s-cp-01"],
+    "type": ["tuple", ["string"]]
+  },
+  "workers": {
+    "value": ["k8s-worker-01", "k8s-worker-02"],
+    "type": ["tuple", ["string", "string"]]
+  },
+  "ansible_ssh_user": {
+    "value": "ubuntu",
+    "type": "string"
+  },
+  "control_plane_ip": {
+    "value": "192.168.1.201",
+    "type": "string"
+  },
+  "vm_names": {
+    "value": ["k8s-cp-01", "k8s-worker-01", "k8s-worker-02"],
+    "type": ["tuple", ["string", "string", "string"]]
+  }
+}

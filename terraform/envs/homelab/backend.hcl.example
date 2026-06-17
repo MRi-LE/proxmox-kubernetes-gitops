@@ -1,0 +1,22 @@
+# terraform/envs/homelab/backend.hcl.example
+#
+# Copy to backend.hcl and fill in your values for local Terraform runs.
+# backend.hcl is .gitignored — never commit it.
+#
+# Usage:
+#   terraform init -backend-config=backend.hcl
+#
+# In CI (Forgejo workflows), these values are passed directly as
+# -backend-config flags — no file needed on the runner.
+
+bucket = "terraform-state"
+key    = "k8s-infra/homelab/terraform.tfstate"
+
+# us-east-1 avoids Terraform constructing synthetic hostnames like
+# sts.homelab.amazonaws.com when skip flags are not processed early enough.
+region = "us-east-1"
+
+# Your RustFS S3 endpoint. Example: http://192.168.1.50:30293
+endpoints = {
+  s3 = "http://<your-rustfs-ip>:30293"
+}

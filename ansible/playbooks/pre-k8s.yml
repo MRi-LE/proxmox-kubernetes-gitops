@@ -1,0 +1,113 @@
+---
+# ansible/playbooks/pre-k8s.yml
+# Runs BEFORE Kubespray's cluster.yml.
+# 1. Wait for SSH (cloud-init can be slow on first boot)
+# 2. Set hostnames
+# 3. Update /etc/hosts
+# 4. Install prerequisite packages
+# 5. Disable swap (Kubernetes hard requirement)
+# 6. Load kernel modules + sysctl
+
+- name: Wait for hosts to come up
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Wait for SSH to be available
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+        delay: 10
+        sleep: 5
+
+    - name: Wait for cloud-init to finish
+      # SSH availability does not guarantee cloud-init is complete.
+      # On first boot, cloud-init writes authorized_keys, sets the hostname,
+      # and runs vendor scripts -- tasks that can race with Ansible if we
+      # proceed immediately after SSH opens.
+      #
+      # Exit codes (cloud-init 23.4+):
+      #   0 = success
+      #   1 = unrecoverable error / crash
+      #   2 = finished with recoverable errors (still "done")
+      # We accept rc=2 as long as stdout confirms "status: done".
+      # rc=1 or any exit without "status: done" is a hard failure.
+      ansible.builtin.command: cloud-init status --wait --long
+      register: cloud_init_status
+      changed_when: false
+      failed_when: >-
+        cloud_init_status.rc not in [0, 2]
+        or 'status: done' not in cloud_init_status.stdout
+
+    - name: Show cloud-init output (printed when rc=2 recoverable errors occurred)
+      ansible.builtin.debug:
+        var: cloud_init_status.stdout_lines
+      when: cloud_init_status.rc == 2
+
+- name: Pre-flight OS configuration
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Set hostname to match inventory name
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+
+    - name: Update /etc/hosts with all cluster nodes
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: "^{{ hostvars[item]['ansible_host'] }}"
+        line: "{{ hostvars[item]['ansible_host'] }}  {{ item }}"
+        state: present
+      loop: "{{ groups['all'] }}"
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install prerequisite packages
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-pip
+          - curl
+          - ca-certificates
+          - gnupg
+          - lsb-release
+        state: present
+
+    - name: Disable swap (current session)
+      ansible.builtin.command: swapoff -a
+      changed_when: false
+
+    - name: Disable swap (persistent)
+      ansible.builtin.replace:
+        path: /etc/fstab
+        regexp: '^([^#].*\s+swap\s+.*)$'
+        replace: '# \1'
+
+    - name: Load required kernel modules
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Persist kernel modules
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+        mode: "0644"
+
+    - name: Set sysctl params required by Kubernetes
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_file: /etc/sysctl.d/99-k8s.conf
+        reload: true
+        state: present
+      loop:
+        - { key: net.bridge.bridge-nf-call-iptables,  value: "1" }
+        - { key: net.bridge.bridge-nf-call-ip6tables, value: "1" }
+        - { key: net.ipv4.ip_forward,                  value: "1" }

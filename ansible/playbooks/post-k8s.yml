@@ -1,0 +1,73 @@
+---
+# ansible/playbooks/post-k8s.yml
+# Runs AFTER Kubespray's cluster.yml.
+# 1. Fetch kubeconfig from the control plane
+# 2. Patch the server URL to be reachable from outside
+# 3. Verify all nodes reach Ready state
+
+- name: Post-install cluster validation
+  hosts: kube_control_plane[0]
+  gather_facts: false
+  become: false
+  vars:
+    kubeconfig_local_dir: "{{ playbook_dir }}/../../kubeconfig"
+    kubeconfig_local_path: "{{ kubeconfig_local_dir }}/homelab.yaml"
+    control_plane_ip: "{{ ansible_host }}"
+
+  tasks:
+    - name: Ensure local kubeconfig directory exists
+      ansible.builtin.file:
+        path: "{{ kubeconfig_local_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+
+    - name: Copy kubeconfig to readable temp location
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /tmp/admin.conf
+        mode: "0644"
+        remote_src: true
+      become: true
+
+    - name: Fetch kubeconfig from control plane
+      ansible.builtin.fetch:
+        src: /tmp/admin.conf
+        dest: "{{ kubeconfig_local_path }}"
+        flat: true
+
+    - name: Remove temp kubeconfig copy
+      ansible.builtin.file:
+        path: /tmp/admin.conf
+        state: absent
+      become: true
+
+    - name: Patch kubeconfig server address to use reachable IP
+      ansible.builtin.replace:
+        path: "{{ kubeconfig_local_path }}"
+        regexp: 'server: https://[^:]+:6443'
+        replace: "server: https://{{ control_plane_ip }}:6443"
+      delegate_to: localhost
+
+    - name: Set kubeconfig permissions
+      ansible.builtin.file:
+        path: "{{ kubeconfig_local_path }}"
+        mode: "0600"
+      delegate_to: localhost
+
+    - name: Wait for all nodes to be Ready
+      ansible.builtin.command: >
+        kubectl --kubeconfig {{ kubeconfig_local_path }}
+                get nodes --no-headers
+      register: nodes_output
+      delegate_to: localhost
+      retries: 20
+      delay: 15
+      until: >
+        nodes_output.stdout_lines | length > 0 and
+        nodes_output.stdout_lines | select('search', 'NotReady') | list | length == 0
+
+    - name: Print node status
+      ansible.builtin.debug:
+        msg: "{{ nodes_output.stdout_lines }}"
+      delegate_to: localhost

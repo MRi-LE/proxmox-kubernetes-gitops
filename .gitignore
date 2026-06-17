@@ -1,0 +1,37 @@
+# ── Terraform ──────────────────────────────────────────────────────────────────
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars            # never commit real tfvars (only .example files)
+!*.tfvars.example   # but DO commit the examples
+terraform/envs/*/terraform.tfplan
+
+# ── Ansible — generated, never commit ─────────────────────────────────────────
+ansible/inventory/generated/
+kubeconfig/
+
+# ── SSH keys ───────────────────────────────────────────────────────────────────
+*.pem
+id_rsa*
+id_ed25519*
+
+# ── Python ─────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# ── Ansible fact cache (local dev) ─────────────────────────────────────────────
+*.retry
+
+# ── OS / editor ────────────────────────────────────────────────────────────────
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# ── Kubespray — cloned at runtime, never committed ────────────────────────────
+ansible/kubespray/
